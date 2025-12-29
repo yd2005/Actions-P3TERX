@@ -41,7 +41,7 @@ jobs:
         go-version: '1.22'
         check-latest: true
 
-    # --- 步骤：现场编译定制版 Caddy (NaïveProxy 服务端) ---
+# --- 步骤：现场编译定制版 Caddy (NaïveProxy 服务端) ---
     - name: Compile Custom Caddy
       run: |
         echo "Building Custom Caddy with ForwardProxy..."
@@ -49,18 +49,19 @@ jobs:
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
         
         # 2. 交叉编译适配 AX6 (ARM64) 的 Caddy
+        # 注意：xcaddy 会自动传递 -s -w 参数进行 Strip，无需再次手动运行 strip
         GOOS=linux GOARCH=arm64 $(go env GOPATH)/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
         
-        # 3. 极致压缩 (Strip + UPX)
-        strip caddy
+        # 3. 极致压缩 (UPX)
+        # 删除 'strip caddy'，直接运行 UPX
         upx --best --lzma caddy
         
         # 4. 准备注入目录结构
         mkdir -p files_caddy/usr/bin
         mkdir -p files_caddy/etc/init.d
         mkdir -p files_caddy/etc/caddy
-        mkdir -p files_caddy/etc/uci-defaults  # 用于存放首次启动脚本
+        mkdir -p files_caddy/etc/uci-defaults
         
         # 移动二进制文件
         mv caddy files_caddy/usr/bin/caddy
@@ -98,12 +99,35 @@ jobs:
         EOF
 
         # 7. 首次启动自动开放防火墙端口 (80/88/443)
-        # 刷机后第一次开机时会自动执行
         cat <<EOF > files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
-        # 开放 80 端口 (HTTP/ACME)
+        # 开放 80 端口
         uci set firewall.caddy80=rule
         uci set firewall.caddy80.name='Allow-Caddy-80'
         uci set firewall.caddy80.src='wan'
         uci set firewall.caddy80.dest_port='80'
-        uci set firewall.c
+        uci set firewall.caddy80.target='ACCEPT'
+        uci set firewall.caddy80.proto='tcp'
+        
+        # 开放 88 端口
+        uci set firewall.caddy88=rule
+        uci set firewall.caddy88.name='Allow-Caddy-88'
+        uci set firewall.caddy88.src='wan'
+        uci set firewall.caddy88.dest_port='88'
+        uci set firewall.caddy88.target='ACCEPT'
+        uci set firewall.caddy88.proto='tcp'
+        
+        # 开放 443 端口
+        uci set firewall.caddy443=rule
+        uci set firewall.caddy443.name='Allow-Caddy-443'
+        uci set firewall.caddy443.src='wan'
+        uci set firewall.caddy443.dest_port='443'
+        uci set firewall.caddy443.target='ACCEPT'
+        uci set firewall.caddy443.proto='tcp'
+        
+        uci commit firewall
+        /etc/init.d/firewall restart
+        
+        rm -f /etc/uci-defaults/99-open-caddy-ports
+        EOF
+        chmod +x files_caddy/etc/uci-defaults/99-open-caddy-ports
