@@ -31,7 +31,7 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
-        # 安装 UPX (用于极致压缩 Caddy)
+        # 安装 UPX
         sudo apt-get install -y upx
 
     # --- 步骤：配置 Go 环境 ---
@@ -41,33 +41,31 @@ jobs:
         go-version: '1.22'
         check-latest: true
 
-    # --- 步骤：现场编译定制版 Caddy ---
+    # --- 步骤：现场编译定制版 Caddy (使用 /tmp 绝对路径防止找不到文件) ---
     - name: Compile Custom Caddy
       run: |
         echo "Building Custom Caddy with ForwardProxy..."
-        # 1. 安装 xcaddy
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
         
-        # 2. 编译 (自动 Strip)
+        # 编译
         GOOS=linux GOARCH=arm64 $(go env GOPATH)/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
         
-        # 3. 极致压缩 (UPX)
-        # 注意：这里去掉了 'strip' 命令，防止报错
+        # 压缩
         upx --best --lzma caddy
         
-        # 4. 准备目录
-        mkdir -p files_caddy/usr/bin
-        mkdir -p files_caddy/etc/init.d
-        mkdir -p files_caddy/etc/caddy
-        mkdir -p files_caddy/etc/uci-defaults
+        # 准备临时目录 (使用 /tmp 绝对路径)
+        mkdir -p /tmp/files_caddy/usr/bin
+        mkdir -p /tmp/files_caddy/etc/init.d
+        mkdir -p /tmp/files_caddy/etc/caddy
+        mkdir -p /tmp/files_caddy/etc/uci-defaults
         
         # 移动文件
-        mv caddy files_caddy/usr/bin/caddy
-        chmod +x files_caddy/usr/bin/caddy
+        mv caddy /tmp/files_caddy/usr/bin/caddy
+        chmod +x /tmp/files_caddy/usr/bin/caddy
         
-        # 5. 生成启动脚本
-        cat <<EOF > files_caddy/etc/init.d/caddy
+        # 生成启动脚本
+        cat <<EOF > /tmp/files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
         STOP=10
@@ -84,10 +82,10 @@ jobs:
             service_stop /usr/bin/caddy
         }
         EOF
-        chmod +x files_caddy/etc/init.d/caddy
+        chmod +x /tmp/files_caddy/etc/init.d/caddy
 
-        # 6. 生成默认配置文件
-        cat <<EOF > files_caddy/etc/caddy/Caddyfile
+        # 生成默认配置文件
+        cat <<EOF > /tmp/files_caddy/etc/caddy/Caddyfile
         {
             order forward_proxy before file_server
         }
@@ -96,26 +94,24 @@ jobs:
         }
         EOF
 
-        # 7. 生成防火墙自动开放脚本 (80/88/443)
-        cat <<EOF > files_caddy/etc/uci-defaults/99-open-caddy-ports
+        # 生成防火墙自动开放脚本 (80/88/443)
+        cat <<EOF > /tmp/files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
-        # 开放 80 端口
+        # 80端口
         uci set firewall.caddy80=rule
         uci set firewall.caddy80.name='Allow-Caddy-80'
         uci set firewall.caddy80.src='wan'
         uci set firewall.caddy80.dest_port='80'
         uci set firewall.caddy80.target='ACCEPT'
         uci set firewall.caddy80.proto='tcp'
-        
-        # 开放 88 端口 (新增)
+        # 88端口
         uci set firewall.caddy88=rule
         uci set firewall.caddy88.name='Allow-Caddy-88'
         uci set firewall.caddy88.src='wan'
         uci set firewall.caddy88.dest_port='88'
         uci set firewall.caddy88.target='ACCEPT'
         uci set firewall.caddy88.proto='tcp'
-        
-        # 开放 443 端口
+        # 443端口
         uci set firewall.caddy443=rule
         uci set firewall.caddy443.name='Allow-Caddy-443'
         uci set firewall.caddy443.src='wan'
@@ -127,9 +123,7 @@ jobs:
         /etc/init.d/firewall restart
         rm -f /etc/uci-defaults/99-open-caddy-ports
         EOF
-        chmod +x files_caddy/etc/uci-defaults/99-open-caddy-ports
-
-    # --- 以下是之前缺失的核心编译步骤 ---
+        chmod +x /tmp/files_caddy/etc/uci-defaults/99-open-caddy-ports
 
     - name: Clone source code
       working-directory: /workdir
@@ -152,9 +146,10 @@ jobs:
         [ -e files ] && mv files openwrt/files
         [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
         
-        # --- 注入编译好的 Caddy ---
+        # --- 注入编译好的 Caddy (从 /tmp 复制) ---
         mkdir -p openwrt/files
-        cp -r files_caddy/* openwrt/files/
+        # 这里的路径改成了 /tmp/files_caddy/*，绝对路径不会错
+        cp -r /tmp/files_caddy/* openwrt/files/
         
         # --- 生成 .config 配置 ---
         cd openwrt
@@ -184,7 +179,7 @@ jobs:
         echo "CONFIG_PACKAGE_zerotier=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
         
-        # 6. 证书管理 (ACME)
+        # 6. 证书管理
         echo "CONFIG_PACKAGE_luci-app-acme=y" >> .config
         echo "CONFIG_PACKAGE_acme=y" >> .config
         echo "CONFIG_PACKAGE_acme-dnsapi=y" >> .config
