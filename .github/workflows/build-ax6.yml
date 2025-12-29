@@ -1,20 +1,14 @@
-name: Build Redmi AX6 (Server Edition)
+name: Build Redmi AX6 (Server - Ultimate)
 
 on:
   workflow_dispatch:
 
 env:
-  # 使用 ImmortalWrt 源码 (对 AX6 支持最好)
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
-  # 引用我们之前创建的独立脚本
   DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
@@ -37,17 +31,65 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
+        # 安装 UPX (用于极致压缩 Caddy，节省 AX6 宝贵的闪存)
+        sudo apt-get install -y upx
+
+    # --- 步骤：现场编译定制版 Caddy (NaïveProxy 服务端) ---
+    - name: Compile Custom Caddy
+      run: |
+        echo "Building Custom Caddy with ForwardProxy..."
+        # 1. 安装 xcaddy 构建工具
+        go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+        
+        # 2. 交叉编译适配 AX6 (ARM64) 的 Caddy，集成 naiveproxy 插件
+        # Caddy 是 Go 写的，必须静态编译
+        GOOS=linux GOARCH=arm64 ~/go/bin/xcaddy build \
+          --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
+        
+        # 3. 极致压缩 (关键！不压进不去 AX6)
+        # strip 去除符号表，upx 进一步压缩体积 (从 ~40MB 压到 ~8MB)
+        strip caddy
+        upx --best --lzma caddy
+        
+        # 4. 准备注入目录结构
+        mkdir -p files_caddy/usr/bin
+        mkdir -p files_caddy/etc/init.d
+        mkdir -p files_caddy/etc/caddy
+        
+        # 移动二进制文件
+        mv caddy files_caddy/usr/bin/caddy
+        chmod +x files_caddy/usr/bin/caddy
+        
+        # 5. 生成 Caddy 启动脚本 (让它像系统服务一样运行)
+        cat <<EOF > files_caddy/etc/init.d/caddy
+        #!/bin/sh /etc/rc.common
+        START=99
+        STOP=10
+        SERVICE_WRITE_PID=1
+        SERVICE_USE_PID=1
+        
+        start() {
+            if [ -f /etc/caddy/Caddyfile ]; then
+                # 指定配置文件路径
+                service_start /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+            else
+                echo "Caddyfile not found!"
+            fi
+        }
+        stop() {
+            service_stop /usr/bin/caddy
+        }
+        EOF
+        chmod +x files_caddy/etc/init.d/caddy
 
     - name: Clone source code
       working-directory: /workdir
       run: |
-        df -hT $PWD
         git clone $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: Load custom feeds
       run: |
-        # 加载 diy-immortalwrt-part1.sh (确保里面有 kenzok8/small 源)
         [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: Update feeds
@@ -61,58 +103,66 @@ jobs:
         [ -e files ] && mv files openwrt/files
         [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
         
-        # --- 核心配置生成区 ---
+        # --- 注入编译好的 Caddy ---
+        # 放入 openwrt/files 目录，编译时会被 SquashFS 打包进固件
+        cp -r files_caddy/* openwrt/files/
+        
+        # --- 生成 .config 配置 ---
         cd openwrt
         touch .config
         
-        # 1. 目标机型设置：Redmi AX6 (IPQ807x)
+        # 1. 机型设置：Redmi AX6 (IPQ807x)
         echo "CONFIG_TARGET_ipq807x=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 2. 启用 NSS 硬件加速 (Sing-box 跑满千兆的关键)
+        # 2. NSS 硬件加速 (Sing-box 跑满千兆的关键)
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. 启用高通闭源 Wi-Fi 固件 (信号更强，带 NSS 加速)
+        # 3. 闭源 Wi-Fi 固件 (信号优化 + NSS支持)
         echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" >> .config
         echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
         
-        # 4. 服务端核心工具
-        # Sing-box 主程序 + 原生 LuCI (用于管理进程)
+        # 4. Sing-box 服务端 & 管理
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
-        # NaiveProxy 二进制文件 (用于手动配置服务端)
-        echo "CONFIG_PACKAGE_naiveproxy=y" >> .config
         
-        # 5. 异地组网/救命通道 (新增 Tailscale & ZeroTier)
-        # Tailscale
+        # 5. 远程组网 (救命通道)
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
-        # ZeroTier
         echo "CONFIG_PACKAGE_zerotier=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
         
-        # 6. 必备管理工具 (远程维护神器)
-        echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> .config  # 网页文件管理
-        echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config        # 网页终端
-        echo "CONFIG_PACKAGE_nano=y" >> .config                 # 命令行文本编辑器
-        echo "CONFIG_PACKAGE_htop=y" >> .config                 # 资源监控
+        # 6. 证书自动管理 (ACME + DNS API)
+        # 必选：luci-app-acme 和 acme-dnsapi (含 Cloudflare/Aliyun 脚本)
+        echo "CONFIG_PACKAGE_luci-app-acme=y" >> .config
+        echo "CONFIG_PACKAGE_acme=y" >> .config
+        echo "CONFIG_PACKAGE_acme-dnsapi=y" >> .config
+        echo "CONFIG_PACKAGE_socat=y" >> .config  # acme 依赖
+        echo "CONFIG_PACKAGE_curl=y" >> .config   # acme 依赖
         
-        # 7. 空间救援行动 (移除所有不必要的客户端和 Docker)
-        echo "CONFIG_PACKAGE_dockerd=n" >> .config              # 移除 Docker (空间不足)
+        # 7. 系统管理工具
+        echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> .config # 上传证书/修改配置必备
+        echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config       # 网页终端
+        echo "CONFIG_PACKAGE_nano=y" >> .config                # 文本编辑
+        echo "CONFIG_PACKAGE_htop=y" >> .config                # 性能监控
+        
+        # 8. 空间清理 (移除所有客户端插件和Docker)
+        echo "CONFIG_PACKAGE_dockerd=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
-        echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config   # 移除 Passwall
+        echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-ssr-plus=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
+        # 移除 naiveproxy 客户端包 (我们已经注入了 Caddy 服务端)
+        echo "CONFIG_PACKAGE_naiveproxy=n" >> .config
         
-        # 8. 极致压缩 (Strip)
-        # 强制剥离所有二进制文件的调试符号，确保能塞进 128M 闪存
+        # 9. 极致压缩 (Strip)
+        # 强制剥离所有二进制文件的调试符号
         echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
         
-        # 生成最终配置
         make defconfig
 
     - name: Download package
@@ -144,26 +194,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Server
+        name: OpenWrt_AX6_Server_Ultimate
         path: ${{ env.FIRMWARE }}
-
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "Redmi AX6 Server Firmware" >> release.txt
-        echo "Includes: NSS, Sing-box, NaiveProxy, Tailscale, ZeroTier" >> release.txt
-        echo "Default IP: 192.168.1.1 (Check your diy-part2.sh)" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
