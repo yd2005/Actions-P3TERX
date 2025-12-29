@@ -34,6 +34,13 @@ jobs:
         # 安装 UPX (用于极致压缩 Caddy，节省 AX6 宝贵的闪存)
         sudo apt-get install -y upx
 
+    # --- 步骤：配置 Go 环境 (防止 runner 自带版本过旧) ---
+    - name: Setup Go environment
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        check-latest: true
+
     # --- 步骤：现场编译定制版 Caddy (NaïveProxy 服务端) ---
     - name: Compile Custom Caddy
       run: |
@@ -41,13 +48,11 @@ jobs:
         # 1. 安装 xcaddy 构建工具
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
         
-        # 2. 交叉编译适配 AX6 (ARM64) 的 Caddy，集成 naiveproxy 插件
-        # Caddy 是 Go 写的，必须静态编译
-        GOOS=linux GOARCH=arm64 ~/go/bin/xcaddy build \
+        # 2. 交叉编译适配 AX6 (ARM64) 的 Caddy
+        GOOS=linux GOARCH=arm64 $(go env GOPATH)/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
         
-        # 3. 极致压缩 (关键！不压进不去 AX6)
-        # strip 去除符号表，upx 进一步压缩体积 (从 ~40MB 压到 ~8MB)
+        # 3. 极致压缩 (Strip + UPX)
         strip caddy
         upx --best --lzma caddy
         
@@ -55,12 +60,13 @@ jobs:
         mkdir -p files_caddy/usr/bin
         mkdir -p files_caddy/etc/init.d
         mkdir -p files_caddy/etc/caddy
+        mkdir -p files_caddy/etc/uci-defaults  # 用于存放首次启动脚本
         
         # 移动二进制文件
         mv caddy files_caddy/usr/bin/caddy
         chmod +x files_caddy/usr/bin/caddy
         
-        # 5. 生成 Caddy 启动脚本 (让它像系统服务一样运行)
+        # 5. 生成 Caddy 启动脚本
         cat <<EOF > files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
@@ -70,7 +76,6 @@ jobs:
         
         start() {
             if [ -f /etc/caddy/Caddyfile ]; then
-                # 指定配置文件路径
                 service_start /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
             else
                 echo "Caddyfile not found!"
@@ -82,118 +87,23 @@ jobs:
         EOF
         chmod +x files_caddy/etc/init.d/caddy
 
-    - name: Clone source code
-      working-directory: /workdir
-      run: |
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        # 6. 生成默认 Caddyfile
+        cat <<EOF > files_caddy/etc/caddy/Caddyfile
+        {
+            order forward_proxy before file_server
+        }
+        :80 {
+            respond "Redmi AX6 Caddy Server is Running!"
+        }
+        EOF
 
-    - name: Load custom feeds
-      run: |
-        [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
-        
-        # --- 注入编译好的 Caddy ---
-        # 放入 openwrt/files 目录，编译时会被 SquashFS 打包进固件
-        mkdir -p openwrt/files
-        cp -r files_caddy/* openwrt/files/
-        
-        # --- 生成 .config 配置 ---
-        cd openwrt
-        touch .config
-        
-        # 1. 机型设置：Redmi AX6 (IPQ807x)
-        echo "CONFIG_TARGET_ipq807x=y" >> .config
-        echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
-        echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
-        
-        # 2. NSS 硬件加速 (Sing-box 跑满千兆的关键)
-        echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
-        
-        # 3. 闭源 Wi-Fi 固件 (信号优化 + NSS支持)
-        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" >> .config
-        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
-        
-        # 4. Sing-box 服务端 & 管理
-        echo "CONFIG_PACKAGE_sing-box=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
-        
-        # 5. 远程组网 (救命通道)
-        echo "CONFIG_PACKAGE_tailscale=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
-        echo "CONFIG_PACKAGE_zerotier=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
-        
-        # 6. 证书自动管理 (ACME + DNS API)
-        # 必选：luci-app-acme 和 acme-dnsapi (含 Cloudflare/Aliyun 脚本)
-        echo "CONFIG_PACKAGE_luci-app-acme=y" >> .config
-        echo "CONFIG_PACKAGE_acme=y" >> .config
-        echo "CONFIG_PACKAGE_acme-dnsapi=y" >> .config
-        echo "CONFIG_PACKAGE_socat=y" >> .config  # acme 依赖
-        echo "CONFIG_PACKAGE_curl=y" >> .config   # acme 依赖
-        
-        # 7. 系统管理工具
-        echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> .config # 上传证书/修改配置必备
-        echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config       # 网页终端
-        echo "CONFIG_PACKAGE_nano=y" >> .config                # 文本编辑
-        echo "CONFIG_PACKAGE_htop=y" >> .config                # 性能监控
-        
-        # 8. 空间清理 (移除所有客户端插件和Docker)
-        echo "CONFIG_PACKAGE_dockerd=n" >> .config
-        echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
-        echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config
-        echo "CONFIG_PACKAGE_luci-app-ssr-plus=n" >> .config
-        echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
-        # 移除 naiveproxy 客户端包 (我们已经注入了 Caddy 服务端)
-        echo "CONFIG_PACKAGE_naiveproxy=n" >> .config
-        
-        # 9. 极致压缩 (Strip)
-        # 强制剥离所有二进制文件的调试符号
-        echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
-        echo "CONFIG_USE_STRIP=y" >> .config
-        
-        make defconfig
-
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Organize files
-      id: organize
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_AX6_Server_Ultimate
-        path: ${{ env.FIRMWARE }}
+        # 7. 首次启动自动开放防火墙端口 (80/88/443)
+        # 刷机后第一次开机时会自动执行
+        cat <<EOF > files_caddy/etc/uci-defaults/99-open-caddy-ports
+        #!/bin/sh
+        # 开放 80 端口 (HTTP/ACME)
+        uci set firewall.caddy80=rule
+        uci set firewall.caddy80.name='Allow-Caddy-80'
+        uci set firewall.caddy80.src='wan'
+        uci set firewall.caddy80.dest_port='80'
+        uci set firewall.c
