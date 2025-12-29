@@ -1,33 +1,53 @@
-name: Build Redmi AX6 (ImmortalWrt)
+name: Build Redmi AX6 (Server Edition)
 
 on:
-  workflow_dispatch:  # 只保留手动触发，防止修改个文件就把所有路由器都编译一遍
+  workflow_dispatch:
 
 env:
+  # 使用 ImmortalWrt 源码 (对 AX6 支持最好)
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
-  # !!! 注意这里：指向刚才新建的独立脚本 !!!
+  # 引用我们之前创建的独立脚本
   DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     steps:
     - name: Checkout
       uses: actions/checkout@main
 
-    # ... (中间的环境初始化步骤同上一次回复，完全一致，此处省略以节省篇幅) ...
-    # 务必把上一次回复中 "Initialization environment" 到 "Clone source code" 的步骤补全到这里
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2204)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: Load custom feeds
       run: |
-        # 这里会调用我们新建的独立脚本，不会影响旧路由器
+        # 加载 diy-immortalwrt-part1.sh (确保里面有 kenzok8/small 源)
         [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: Update feeds
@@ -41,27 +61,109 @@ jobs:
         [ -e files ] && mv files openwrt/files
         [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
         
-        # --- AX6 专用配置生成区 ---
+        # --- 核心配置生成区 ---
         cd openwrt
         touch .config
+        
+        # 1. 目标机型设置：Redmi AX6 (IPQ807x)
         echo "CONFIG_TARGET_ipq807x=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 启用 NSS 和 闭源驱动
+        # 2. 启用 NSS 硬件加速 (Sing-box 跑满千兆的关键)
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
+        
+        # 3. 启用高通闭源 Wi-Fi 固件 (信号更强，带 NSS 加速)
         echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" >> .config
         echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
         
-        # 核心插件
+        # 4. 服务端核心工具
+        # Sing-box 主程序 + 原生 LuCI (用于管理进程)
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
+        # NaiveProxy 二进制文件 (用于手动配置服务端)
         echo "CONFIG_PACKAGE_naiveproxy=y" >> .config
-        # 必须 strip
+        
+        # 5. 异地组网/救命通道 (新增 Tailscale & ZeroTier)
+        # Tailscale
+        echo "CONFIG_PACKAGE_tailscale=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
+        # ZeroTier
+        echo "CONFIG_PACKAGE_zerotier=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
+        
+        # 6. 必备管理工具 (远程维护神器)
+        echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> .config  # 网页文件管理
+        echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config        # 网页终端
+        echo "CONFIG_PACKAGE_nano=y" >> .config                 # 命令行文本编辑器
+        echo "CONFIG_PACKAGE_htop=y" >> .config                 # 资源监控
+        
+        # 7. 空间救援行动 (移除所有不必要的客户端和 Docker)
+        echo "CONFIG_PACKAGE_dockerd=n" >> .config              # 移除 Docker (空间不足)
+        echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
+        echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config   # 移除 Passwall
+        echo "CONFIG_PACKAGE_luci-app-ssr-plus=n" >> .config
+        echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
+        
+        # 8. 极致压缩 (Strip)
+        # 强制剥离所有二进制文件的调试符号，确保能塞进 128M 闪存
         echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
         
+        # 生成最终配置
         make defconfig
 
-    # ... (后续的 Download, Compile, Upload 步骤同上一次回复) ...
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Organize files
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_AX6_Server
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "Redmi AX6 Server Firmware" >> release.txt
+        echo "Includes: NSS, Sing-box, NaiveProxy, Tailscale, ZeroTier" >> release.txt
+        echo "Default IP: 192.168.1.1 (Check your diy-part2.sh)" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
