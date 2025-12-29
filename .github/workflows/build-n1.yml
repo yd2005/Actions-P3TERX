@@ -1,0 +1,67 @@
+name: Build Redmi AX6 (ImmortalWrt)
+
+on:
+  workflow_dispatch:  # 只保留手动触发，防止修改个文件就把所有路由器都编译一遍
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-23.05
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  # !!! 注意这里：指向刚才新建的独立脚本 !!!
+  DIY_P1_SH: diy-immortalwrt-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    # ... (中间的环境初始化步骤同上一次回复，完全一致，此处省略以节省篇幅) ...
+    # 务必把上一次回复中 "Initialization environment" 到 "Clone source code" 的步骤补全到这里
+
+    - name: Load custom feeds
+      run: |
+        # 这里会调用我们新建的独立脚本，不会影响旧路由器
+        [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # --- AX6 专用配置生成区 ---
+        cd openwrt
+        touch .config
+        echo "CONFIG_TARGET_ipq807x=y" >> .config
+        echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
+        echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
+        
+        # 启用 NSS 和 闭源驱动
+        echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
+        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" >> .config
+        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
+        
+        # 核心插件
+        echo "CONFIG_PACKAGE_sing-box=y" >> .config
+        echo "CONFIG_PACKAGE_naiveproxy=y" >> .config
+        # 必须 strip
+        echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
+        echo "CONFIG_USE_STRIP=y" >> .config
+        
+        make defconfig
+
+    # ... (后续的 Download, Compile, Upload 步骤同上一次回复) ...
