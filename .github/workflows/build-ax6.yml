@@ -31,50 +31,48 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
-        # 安装 UPX (用于极致压缩 Caddy，节省 AX6 宝贵的闪存)
+        # 安装 UPX (用于极致压缩 Caddy)
         sudo apt-get install -y upx
 
-    # --- 步骤：配置 Go 环境 (防止 runner 自带版本过旧) ---
+    # --- 步骤：配置 Go 环境 ---
     - name: Setup Go environment
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
         check-latest: true
 
-# --- 步骤：现场编译定制版 Caddy (NaïveProxy 服务端) ---
+    # --- 步骤：现场编译定制版 Caddy ---
     - name: Compile Custom Caddy
       run: |
         echo "Building Custom Caddy with ForwardProxy..."
-        # 1. 安装 xcaddy 构建工具
+        # 1. 安装 xcaddy
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
         
-        # 2. 交叉编译适配 AX6 (ARM64) 的 Caddy
-        # 注意：xcaddy 会自动传递 -s -w 参数进行 Strip，无需再次手动运行 strip
+        # 2. 编译 (自动 Strip)
         GOOS=linux GOARCH=arm64 $(go env GOPATH)/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
         
         # 3. 极致压缩 (UPX)
-        # 删除 'strip caddy'，直接运行 UPX
+        # 注意：这里去掉了 'strip' 命令，防止报错
         upx --best --lzma caddy
         
-        # 4. 准备注入目录结构
+        # 4. 准备目录
         mkdir -p files_caddy/usr/bin
         mkdir -p files_caddy/etc/init.d
         mkdir -p files_caddy/etc/caddy
         mkdir -p files_caddy/etc/uci-defaults
         
-        # 移动二进制文件
+        # 移动文件
         mv caddy files_caddy/usr/bin/caddy
         chmod +x files_caddy/usr/bin/caddy
         
-        # 5. 生成 Caddy 启动脚本
+        # 5. 生成启动脚本
         cat <<EOF > files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
         STOP=10
         SERVICE_WRITE_PID=1
         SERVICE_USE_PID=1
-        
         start() {
             if [ -f /etc/caddy/Caddyfile ]; then
                 service_start /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -88,7 +86,7 @@ jobs:
         EOF
         chmod +x files_caddy/etc/init.d/caddy
 
-        # 6. 生成默认 Caddyfile
+        # 6. 生成默认配置文件
         cat <<EOF > files_caddy/etc/caddy/Caddyfile
         {
             order forward_proxy before file_server
@@ -98,7 +96,7 @@ jobs:
         }
         EOF
 
-        # 7. 首次启动自动开放防火墙端口 (80/88/443)
+        # 7. 生成防火墙自动开放脚本 (80/88/443)
         cat <<EOF > files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
         # 开放 80 端口
@@ -109,7 +107,7 @@ jobs:
         uci set firewall.caddy80.target='ACCEPT'
         uci set firewall.caddy80.proto='tcp'
         
-        # 开放 88 端口
+        # 开放 88 端口 (新增)
         uci set firewall.caddy88=rule
         uci set firewall.caddy88.name='Allow-Caddy-88'
         uci set firewall.caddy88.src='wan'
@@ -127,7 +125,120 @@ jobs:
         
         uci commit firewall
         /etc/init.d/firewall restart
-        
         rm -f /etc/uci-defaults/99-open-caddy-ports
         EOF
         chmod +x files_caddy/etc/uci-defaults/99-open-caddy-ports
+
+    # --- 以下是之前缺失的核心编译步骤 ---
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load custom feeds
+      run: |
+        [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # --- 注入编译好的 Caddy ---
+        mkdir -p openwrt/files
+        cp -r files_caddy/* openwrt/files/
+        
+        # --- 生成 .config 配置 ---
+        cd openwrt
+        touch .config
+        
+        # 1. 机型设置
+        echo "CONFIG_TARGET_ipq807x=y" >> .config
+        echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
+        echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
+        
+        # 2. NSS 硬件加速
+        echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
+        
+        # 3. 闭源 Wi-Fi 固件
+        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" >> .config
+        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
+        
+        # 4. Sing-box
+        echo "CONFIG_PACKAGE_sing-box=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
+        
+        # 5. 远程组网
+        echo "CONFIG_PACKAGE_tailscale=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
+        echo "CONFIG_PACKAGE_zerotier=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
+        
+        # 6. 证书管理 (ACME)
+        echo "CONFIG_PACKAGE_luci-app-acme=y" >> .config
+        echo "CONFIG_PACKAGE_acme=y" >> .config
+        echo "CONFIG_PACKAGE_acme-dnsapi=y" >> .config
+        echo "CONFIG_PACKAGE_socat=y" >> .config
+        echo "CONFIG_PACKAGE_curl=y" >> .config
+        
+        # 7. 工具
+        echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config
+        echo "CONFIG_PACKAGE_nano=y" >> .config
+        echo "CONFIG_PACKAGE_htop=y" >> .config
+        
+        # 8. 空间清理
+        echo "CONFIG_PACKAGE_dockerd=n" >> .config
+        echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
+        echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config
+        echo "CONFIG_PACKAGE_luci-app-ssr-plus=n" >> .config
+        echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
+        echo "CONFIG_PACKAGE_naiveproxy=n" >> .config
+        
+        # 9. 压缩
+        echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
+        echo "CONFIG_USE_STRIP=y" >> .config
+        
+        make defconfig
+
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Organize files
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_AX6_Server_Ultimate
+        path: ${{ env.FIRMWARE }}
