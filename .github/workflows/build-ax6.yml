@@ -31,7 +31,6 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
-        # 安装 UPX
         sudo apt-get install -y upx
 
     # --- 步骤：配置 Go 环境 ---
@@ -41,30 +40,26 @@ jobs:
         go-version: '1.22'
         check-latest: true
 
-    # --- 步骤：现场编译定制版 Caddy (使用 /tmp 绝对路径防止找不到文件) ---
+    # --- 步骤：现场编译定制版 Caddy ---
     - name: Compile Custom Caddy
       run: |
         echo "Building Custom Caddy with ForwardProxy..."
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
         
-        # 编译
         GOOS=linux GOARCH=arm64 $(go env GOPATH)/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
         
-        # 压缩
         upx --best --lzma caddy
         
-        # 准备临时目录 (使用 /tmp 绝对路径)
+        # 准备临时目录 (/tmp)
         mkdir -p /tmp/files_caddy/usr/bin
         mkdir -p /tmp/files_caddy/etc/init.d
         mkdir -p /tmp/files_caddy/etc/caddy
         mkdir -p /tmp/files_caddy/etc/uci-defaults
         
-        # 移动文件
         mv caddy /tmp/files_caddy/usr/bin/caddy
         chmod +x /tmp/files_caddy/usr/bin/caddy
         
-        # 生成启动脚本
         cat <<EOF > /tmp/files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
@@ -84,7 +79,6 @@ jobs:
         EOF
         chmod +x /tmp/files_caddy/etc/init.d/caddy
 
-        # 生成默认配置文件
         cat <<EOF > /tmp/files_caddy/etc/caddy/Caddyfile
         {
             order forward_proxy before file_server
@@ -94,24 +88,22 @@ jobs:
         }
         EOF
 
-        # 生成防火墙自动开放脚本 (80/88/443)
         cat <<EOF > /tmp/files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
-        # 80端口
         uci set firewall.caddy80=rule
         uci set firewall.caddy80.name='Allow-Caddy-80'
         uci set firewall.caddy80.src='wan'
         uci set firewall.caddy80.dest_port='80'
         uci set firewall.caddy80.target='ACCEPT'
         uci set firewall.caddy80.proto='tcp'
-        # 88端口
+        
         uci set firewall.caddy88=rule
         uci set firewall.caddy88.name='Allow-Caddy-88'
         uci set firewall.caddy88.src='wan'
         uci set firewall.caddy88.dest_port='88'
         uci set firewall.caddy88.target='ACCEPT'
         uci set firewall.caddy88.proto='tcp'
-        # 443端口
+        
         uci set firewall.caddy443=rule
         uci set firewall.caddy443.name='Allow-Caddy-443'
         uci set firewall.caddy443.src='wan'
@@ -141,58 +133,59 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
+    # --- 核心修复：修正了目录层级逻辑 ---
     - name: Load custom configuration
       run: |
+        # 1. 如果仓库有 files 目录，移动过去
         [ -e files ] && mv files openwrt/files
-        [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P2_SH
         
-        # --- 注入编译好的 Caddy (从 /tmp 复制) ---
-        mkdir -p openwrt/files
-        # 这里的路径改成了 /tmp/files_caddy/*，绝对路径不会错
-        cp -r /tmp/files_caddy/* openwrt/files/
+        # 2. 赋予脚本执行权限
+        [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH
         
-        # --- 生成 .config 配置 ---
+        # 3. 统一进入 openwrt 目录 (关键步骤)
         cd openwrt
+        
+        # 4. 执行 DIY 脚本 (使用绝对路径)
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # 5. 注入 Caddy (此时已经在 openwrt 目录内，直接操作 files 即可)
+        mkdir -p files
+        cp -r /tmp/files_caddy/* files/
+        
+        # 6. 生成 .config (此时已经在 openwrt 目录内)
         touch .config
         
-        # 1. 机型设置
+        # 写入配置
         echo "CONFIG_TARGET_ipq807x=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 2. NSS 硬件加速
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. 闭源 Wi-Fi 固件
         echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" >> .config
         echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
         
-        # 4. Sing-box
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
         
-        # 5. 远程组网
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
         echo "CONFIG_PACKAGE_zerotier=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
         
-        # 6. 证书管理
         echo "CONFIG_PACKAGE_luci-app-acme=y" >> .config
         echo "CONFIG_PACKAGE_acme=y" >> .config
         echo "CONFIG_PACKAGE_acme-dnsapi=y" >> .config
         echo "CONFIG_PACKAGE_socat=y" >> .config
         echo "CONFIG_PACKAGE_curl=y" >> .config
         
-        # 7. 工具
         echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config
         echo "CONFIG_PACKAGE_nano=y" >> .config
         echo "CONFIG_PACKAGE_htop=y" >> .config
         
-        # 8. 空间清理
         echo "CONFIG_PACKAGE_dockerd=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config
@@ -200,10 +193,10 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
         echo "CONFIG_PACKAGE_naiveproxy=n" >> .config
         
-        # 9. 压缩
         echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
         
+        # 此时在 openwrt 目录下，Makefile 存在，defconfig 可以正常运行
         make defconfig
 
     - name: Download package
