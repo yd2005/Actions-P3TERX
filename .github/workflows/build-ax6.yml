@@ -105,6 +105,7 @@ jobs:
         
         # --- 注入编译好的 Caddy ---
         # 放入 openwrt/files 目录，编译时会被 SquashFS 打包进固件
+        mkdir -p openwrt/files
         cp -r files_caddy/* openwrt/files/
         
         # --- 生成 .config 配置 ---
