@@ -33,7 +33,7 @@ jobs:
         sudo chown $USER:$GROUPS /workdir
         sudo apt-get install -y upx
 
-    # --- 步骤：配置 Go 环境 ---
+    # --- 步骤：配置 Go 环境 (给 Caddy 用) ---
     - name: Setup Go environment
       uses: actions/setup-go@v5
       with:
@@ -51,7 +51,7 @@ jobs:
         
         upx --best --lzma caddy
         
-        # 准备临时目录 (/tmp)
+        # 准备临时目录
         mkdir -p /tmp/files_caddy/usr/bin
         mkdir -p /tmp/files_caddy/etc/init.d
         mkdir -p /tmp/files_caddy/etc/caddy
@@ -130,32 +130,31 @@ jobs:
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
+    # --- 新增关键修复：替换系统 Golang 为 1.23+ 版本 ---
+    - name: Fix Golang Version
+      run: |
+        cd openwrt
+        # 删除旧的 golang 语言包
+        rm -rf feeds/packages/lang/golang
+        # 拉取支持 Go 1.23 的第三方 golang 语言包
+        git clone https://github.com/sbwml/packages_lang_golang feeds/packages/lang/golang
+
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    # --- 核心修复：修正了目录层级逻辑 ---
     - name: Load custom configuration
       run: |
-        # 1. 如果仓库有 files 目录，移动过去
         [ -e files ] && mv files openwrt/files
-        
-        # 2. 赋予脚本执行权限
         [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH
         
-        # 3. 统一进入 openwrt 目录 (关键步骤)
         cd openwrt
-        
-        # 4. 执行 DIY 脚本 (使用绝对路径)
         $GITHUB_WORKSPACE/$DIY_P2_SH
         
-        # 5. 注入 Caddy (此时已经在 openwrt 目录内，直接操作 files 即可)
         mkdir -p files
         cp -r /tmp/files_caddy/* files/
         
-        # 6. 生成 .config (此时已经在 openwrt 目录内)
         touch .config
         
-        # 写入配置
         echo "CONFIG_TARGET_ipq807x=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
@@ -196,7 +195,6 @@ jobs:
         echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
         
-        # 此时在 openwrt 目录下，Makefile 存在，defconfig 可以正常运行
         make defconfig
 
     - name: Download package
