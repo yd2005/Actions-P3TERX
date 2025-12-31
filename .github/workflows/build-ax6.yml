@@ -147,16 +147,16 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区适配 2.0 - 修复版】
+        # 【大分区适配 3.0 - 终极修复版】
         # =======================================================
         echo "Applying Big Partition Layout Patch..."
         
-        # 1. 解锁 Kernel 大小限制 (防止编译报错)
+        # 1. 解锁 Kernel 大小限制
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
         
-        # 2. 查找 DTS 文件 (使用模糊匹配，防止找不到文件)
-        # 只要文件名包含 redmi-router-ax6.dts 就能找到
-        DTS_FILE=$(find target/linux/ipq807x -name "*redmi-router-ax6.dts" | head -n 1)
+        # 2. 查找 DTS 文件 (精确匹配 ipq8071-ax6.dts)
+        # 根据日志，这就是正确的文件名
+        DTS_FILE=$(find target/linux/ipq807x -name "ipq8071-ax6.dts" | head -n 1)
         
         if [ -f "$DTS_FILE" ]; then
             echo "Found DTS file: $DTS_FILE"
@@ -165,7 +165,7 @@ jobs:
             echo "DTS patched successfully!"
         else
             echo "::error::AX6 DTS file not found! Partition patch failed."
-            # 列出所有 DTS 方便排查 (万一还是失败)
+            # 如果还找不到，再次列出目录供排查
             find target/linux/ipq807x -name "*.dts"
             exit 1
         fi
@@ -179,7 +179,7 @@ jobs:
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 2. NSS 加速 (自动处理依赖)
+        # 2. NSS 加速
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
@@ -253,5 +253,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Fixed_BigPartition
+        name: OpenWrt_AX6_Fixed_BigPartition_V3
         path: ${{ env.FIRMWARE }}
