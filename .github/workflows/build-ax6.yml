@@ -7,7 +7,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
-  # 禁用 Part1 脚本，防止引入 kenzok8 源导致的 firewall4 冲突
+  # 禁用 Part1 脚本，防止引入冲突源
   # DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   TZ: Asia/Shanghai
@@ -34,7 +34,7 @@ jobs:
         sudo chown $USER:$GROUPS /workdir
         sudo apt-get install -y upx
 
-    # --- Caddy 编译 (使用 Action 自带的 Go) ---
+    # --- Caddy 编译 ---
     - name: Setup Go environment
       uses: actions/setup-go@v5
       with:
@@ -147,21 +147,33 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区适配 - 验证成功版】
+        # 【大分区适配 - 终极版】
         # =======================================================
         echo "Applying Big Partition Layout Patch..."
         
+        # 1. 解锁 Kernel 大小限制
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
         
+        # 2. 修改设备树 (已验证路径正确)
         DTS_FILE=$(find target/linux/ipq807x -name "ipq8071-ax6.dts" | head -n 1)
-        
         if [ -f "$DTS_FILE" ]; then
-            echo "Found DTS file: $DTS_FILE"
             sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' "$DTS_FILE"
             echo "DTS patched successfully!"
         else
-            echo "::error::AX6 DTS file not found! Partition patch failed."
+            echo "::error::AX6 DTS file not found!"
             exit 1
+        fi
+
+        # 3. 【关键修复】修改源码依赖，允许使用 NSS 固件
+        # 这一步是为了防止 "Target dropped" 错误
+        MK_FILE=$(grep -rl "DEVICE_xiaomi_redmi-router-ax6" target/linux/ipq807x/image)
+        if [ -n "$MK_FILE" ]; then
+            echo "Found device definition in: $MK_FILE"
+            # 将源码中写死的官方固件依赖替换为 NSS 固件
+            sed -i 's/ath11k-firmware-qcn9074/ath11k-firmware-qcn9074-nss/g' "$MK_FILE"
+            echo "Device dependency patched: Switched to NSS firmware!"
+        else
+            echo "::warning::AX6 Device definition not found, dependency patch skipped."
         fi
         # =======================================================
 
@@ -173,17 +185,15 @@ jobs:
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 2. NSS 加速 (AX6 必选)
+        # 2. NSS 加速
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # ⚠️ 关键修改：【绝不要】手动禁用默认 Wi-Fi 固件
-        # 删除 "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" 这行，否则会导致目标丢失
-        # 只要启用下面的 -nss 版本即可，系统会自动处理替换
+        # 3. Wi-Fi 固件 (我们已经修改了源码依赖，这里直接选 NSS 版)
         echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
         
-        # 3. 插件
+        # 4. 插件
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
@@ -200,11 +210,11 @@ jobs:
         echo "CONFIG_PACKAGE_nano=y" >> .config
         echo "CONFIG_PACKAGE_htop=y" >> .config
         
-        # 4. 解决 dnsmasq 冲突
+        # 5. 解决 dnsmasq 冲突 (sing-box 或 clash 有时需要完整版)
         echo "CONFIG_PACKAGE_dnsmasq=n" >> .config
         echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
         
-        # 5. 清理
+        # 6. 清理
         echo "CONFIG_PACKAGE_dockerd=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config
@@ -212,7 +222,7 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
         echo "CONFIG_PACKAGE_naiveproxy=n" >> .config
         
-        # 6. 压缩
+        # 7. 压缩
         echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
         
@@ -223,7 +233,7 @@ jobs:
         if grep -q "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" .config; then
             echo "SUCCESS: Redmi AX6 target is correctly selected."
         else
-            echo "::error::FAILURE: Redmi AX6 target was dropped! Please check .config content."
+            echo "::error::FAILURE: Redmi AX6 target was dropped! Check logs above."
             exit 1
         fi
 
@@ -256,5 +266,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Final_Fixed_V5
+        name: OpenWrt_AX6_Final_Fixed_V6
         path: ${{ env.FIRMWARE }}
