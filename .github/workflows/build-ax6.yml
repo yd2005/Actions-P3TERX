@@ -7,7 +7,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
-  # 注意：DIY_P1_SH 我们在下面步骤中禁用了，因为里面的源有冲突
+  # 注意：我们将在下面步骤中禁用此脚本，防止引入冲突源
   DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   TZ: Asia/Shanghai
@@ -121,8 +121,8 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        # ⚠️ 关键修改：不再执行 DIY_P1_SH
-        # 原因：kenzok8/small 源会导致 firewall4 循环依赖错误
+        # ⚠️ 关键修改：跳过执行 DIY_P1_SH
+        # 原因：kenzok8/small 源会导致 firewall4 循环依赖错误，导致机型配置丢失
         echo "Skipping external feeds (conflicting with firewall4)..."
         # [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
 
