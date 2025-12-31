@@ -55,7 +55,6 @@ jobs:
         mv caddy /tmp/files_caddy/usr/bin/caddy
         chmod +x /tmp/files_caddy/usr/bin/caddy
         
-        # Caddy 启动脚本
         cat <<EOF > /tmp/files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
@@ -75,7 +74,6 @@ jobs:
         EOF
         chmod +x /tmp/files_caddy/etc/init.d/caddy
 
-        # 默认 Caddyfile
         cat <<EOF > /tmp/files_caddy/etc/caddy/Caddyfile
         {
             order forward_proxy before file_server
@@ -85,7 +83,6 @@ jobs:
         }
         EOF
 
-        # 防火墙自动开放端口
         cat <<EOF > /tmp/files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
         uci set firewall.caddy80=rule
@@ -149,17 +146,30 @@ jobs:
         mkdir -p files
         cp -r /tmp/files_caddy/* files/
         
-        # --- 大分区补丁 (针对 Hanwckf Uboot) ---
+        # =======================================================
+        # 【大分区适配 2.0 - 修复版】
+        # =======================================================
         echo "Applying Big Partition Layout Patch..."
+        
+        # 1. 解锁 Kernel 大小限制 (防止编译报错)
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
-        DTS_FILE=$(find target/linux/ipq807x -name "ipq8074-xiaomi-redmi-router-ax6.dts")
+        
+        # 2. 查找 DTS 文件 (使用模糊匹配，防止找不到文件)
+        # 只要文件名包含 redmi-router-ax6.dts 就能找到
+        DTS_FILE=$(find target/linux/ipq807x -name "*redmi-router-ax6.dts" | head -n 1)
+        
         if [ -f "$DTS_FILE" ]; then
-            sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' $DTS_FILE
-            echo "DTS patched: $DTS_FILE"
+            echo "Found DTS file: $DTS_FILE"
+            # 暴力替换分区定义：适配 116MB 大分区 (0x7400000)
+            sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' "$DTS_FILE"
+            echo "DTS patched successfully!"
         else
-            echo "::error::AX6 DTS file not found! Check source code structure."
+            echo "::error::AX6 DTS file not found! Partition patch failed."
+            # 列出所有 DTS 方便排查 (万一还是失败)
+            find target/linux/ipq807x -name "*.dts"
             exit 1
         fi
+        # =======================================================
 
         # --- 生成配置文件 ---
         touch .config
@@ -169,7 +179,7 @@ jobs:
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 2. NSS 加速 (允许自动处理 Wi-Fi 固件依赖，不要手动禁用 qcn9074)
+        # 2. NSS 加速 (自动处理依赖)
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
@@ -205,14 +215,12 @@ jobs:
         
         make defconfig
         
-        # --- 关键检查：确认 AX6 是否真的被选中 ---
+        # --- 最终检查 ---
         echo "Checking if AX6 target is selected..."
         if grep -q "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" .config; then
             echo "SUCCESS: Redmi AX6 target is correctly selected."
         else
-            echo "::error::FAILURE: Redmi AX6 target was dropped! Check dependencies."
-            echo "Current .config content:"
-            cat .config | grep "CONFIG_TARGET"
+            echo "::error::FAILURE: Redmi AX6 target was dropped!"
             exit 1
         fi
 
@@ -245,5 +253,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Fixed
+        name: OpenWrt_AX6_Fixed_BigPartition
         path: ${{ env.FIRMWARE }}
