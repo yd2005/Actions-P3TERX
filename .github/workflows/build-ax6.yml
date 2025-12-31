@@ -7,8 +7,8 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
-  # 注意：我们将在下面步骤中禁用此脚本，防止引入冲突源
-  DIY_P1_SH: diy-immortalwrt-part1.sh
+  # 禁用 Part1 脚本，防止引入 kenzok8 源导致的 firewall4 冲突
+  # DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   TZ: Asia/Shanghai
 
@@ -34,6 +34,7 @@ jobs:
         sudo chown $USER:$GROUPS /workdir
         sudo apt-get install -y upx
 
+    # --- Caddy 编译 (使用 Action 自带的 Go，不影响系统源码) ---
     - name: Setup Go environment
       uses: actions/setup-go@v5
       with:
@@ -56,6 +57,7 @@ jobs:
         mv caddy /tmp/files_caddy/usr/bin/caddy
         chmod +x /tmp/files_caddy/usr/bin/caddy
         
+        # 启动脚本
         cat <<EOF > /tmp/files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
@@ -75,6 +77,7 @@ jobs:
         EOF
         chmod +x /tmp/files_caddy/etc/init.d/caddy
 
+        # 默认配置
         cat <<EOF > /tmp/files_caddy/etc/caddy/Caddyfile
         {
             order forward_proxy before file_server
@@ -84,6 +87,7 @@ jobs:
         }
         EOF
 
+        # 防火墙端口开放
         cat <<EOF > /tmp/files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
         uci set firewall.caddy80=rule
@@ -121,20 +125,14 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        # ⚠️ 关键修改：跳过执行 DIY_P1_SH
-        # 原因：kenzok8/small 源会导致 firewall4 循环依赖错误，导致机型配置丢失
-        echo "Skipping external feeds (conflicting with firewall4)..."
-        # [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
+        # 跳过 DIY_P1_SH，只使用官方源
+        echo "Skipping 3rd party feeds to prevent conflicts."
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
-    - name: Fix Golang Version
-      run: |
-        cd openwrt
-        # 为了编译 Sing-box，我们需要新版 Go
-        rm -rf feeds/packages/lang/golang
-        git clone https://github.com/sbwml/packages_lang_golang feeds/packages/lang/golang
+    # ⚠️ 关键修改：删除了 Fix Golang Version 步骤
+    # 使用官方源码自带的 Go 1.21，确保系统稳定性
 
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
@@ -152,16 +150,19 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区适配 - 成功验证版】
+        # 【大分区适配 - 验证成功版】
         # =======================================================
         echo "Applying Big Partition Layout Patch..."
+        
+        # 1. 解锁 Kernel 大小限制
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
         
-        # 使用精确匹配 (基于你的成功日志)
+        # 2. 查找 DTS 文件 (精确文件名匹配)
         DTS_FILE=$(find target/linux/ipq807x -name "ipq8071-ax6.dts" | head -n 1)
         
         if [ -f "$DTS_FILE" ]; then
             echo "Found DTS file: $DTS_FILE"
+            # 暴力替换分区定义：适配 116MB 大分区 (0x7400000)
             sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' "$DTS_FILE"
             echo "DTS patched successfully!"
         else
@@ -178,12 +179,12 @@ jobs:
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 2. NSS 加速
+        # 2. NSS 加速 (AX6 必选)
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. 插件 (Sing-box 使用官方源编译)
+        # 3. 插件 (使用官方源 sing-box)
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
@@ -200,7 +201,11 @@ jobs:
         echo "CONFIG_PACKAGE_nano=y" >> .config
         echo "CONFIG_PACKAGE_htop=y" >> .config
         
-        # 4. 清理
+        # 4. 解决 dnsmasq 冲突 (推荐)
+        echo "CONFIG_PACKAGE_dnsmasq=n" >> .config
+        echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
+        
+        # 5. 清理不必要的
         echo "CONFIG_PACKAGE_dockerd=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config
@@ -208,7 +213,7 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
         echo "CONFIG_PACKAGE_naiveproxy=n" >> .config
         
-        # 5. 压缩
+        # 6. 压缩
         echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
         
@@ -219,7 +224,7 @@ jobs:
         if grep -q "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" .config; then
             echo "SUCCESS: Redmi AX6 target is correctly selected."
         else
-            echo "::error::FAILURE: Redmi AX6 target was dropped! Check for dependency conflicts."
+            echo "::error::FAILURE: Redmi AX6 target was dropped! It is likely a dependency issue."
             exit 1
         fi
 
@@ -252,5 +257,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Final_Fixed
+        name: OpenWrt_AX6_Final_Fixed_V4
         path: ${{ env.FIRMWARE }}
