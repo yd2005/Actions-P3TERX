@@ -21,25 +21,28 @@ jobs:
       - name: Install UPX (用于压缩路由器版本)
         run: sudo apt-get install -y upx
 
-      # 1. 编译 AMD64 版本 (常规 VPS)
-      # 修正点：移除 --ldflags 参数，改用环境变量 GOFLAGS
+      # 1. 编译 AMD64 版本 (VPS)
+      # 去掉了导致报错的 GOFLAGS，改用后续的 strip 命令瘦身
       - name: Build AMD64 (VPS)
         run: |
-          export GOFLAGS="-ldflags='-s -w' -trimpath"
           GOOS=linux GOARCH=amd64 ~/go/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive \
           --output caddy-linux-amd64
 
+      - name: Strip AMD64 (瘦身)
+        run: strip -s caddy-linux-amd64
+
       # 2. 编译 ARM64 版本 (ARM VPS + 路由器源文件)
-      # 修正点：同样改用 GOFLAGS
       - name: Build ARM64 (VPS & AX6/AX6000)
         run: |
-          export GOFLAGS="-ldflags='-s -w' -trimpath"
           GOOS=linux GOARCH=arm64 ~/go/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive \
           --output caddy-linux-arm64
 
-      # 3. 生成路由器专用压缩版 (基于 ARM64)
+      - name: Strip ARM64 (瘦身)
+        run: strip -s caddy-linux-arm64
+
+      # 3. 生成路由器专用压缩版 (基于已瘦身的 ARM64)
       - name: Create Compressed Version for Routers
         run: |
           cp caddy-linux-arm64 caddy-linux-arm64-upx
