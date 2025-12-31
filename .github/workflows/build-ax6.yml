@@ -7,6 +7,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
+  # 注意：DIY_P1_SH 我们在下面步骤中禁用了，因为里面的源有冲突
   DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   TZ: Asia/Shanghai
@@ -120,7 +121,10 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
+        # ⚠️ 关键修改：不再执行 DIY_P1_SH
+        # 原因：kenzok8/small 源会导致 firewall4 循环依赖错误
+        echo "Skipping external feeds (conflicting with firewall4)..."
+        # [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && cd openwrt && $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
@@ -128,6 +132,7 @@ jobs:
     - name: Fix Golang Version
       run: |
         cd openwrt
+        # 为了编译 Sing-box，我们需要新版 Go
         rm -rf feeds/packages/lang/golang
         git clone https://github.com/sbwml/packages_lang_golang feeds/packages/lang/golang
 
@@ -147,26 +152,20 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区适配 3.0 - 终极修复版】
+        # 【大分区适配 - 成功验证版】
         # =======================================================
         echo "Applying Big Partition Layout Patch..."
-        
-        # 1. 解锁 Kernel 大小限制
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
         
-        # 2. 查找 DTS 文件 (精确匹配 ipq8071-ax6.dts)
-        # 根据日志，这就是正确的文件名
+        # 使用精确匹配 (基于你的成功日志)
         DTS_FILE=$(find target/linux/ipq807x -name "ipq8071-ax6.dts" | head -n 1)
         
         if [ -f "$DTS_FILE" ]; then
             echo "Found DTS file: $DTS_FILE"
-            # 暴力替换分区定义：适配 116MB 大分区 (0x7400000)
             sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' "$DTS_FILE"
             echo "DTS patched successfully!"
         else
             echo "::error::AX6 DTS file not found! Partition patch failed."
-            # 如果还找不到，再次列出目录供排查
-            find target/linux/ipq807x -name "*.dts"
             exit 1
         fi
         # =======================================================
@@ -184,7 +183,7 @@ jobs:
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. 插件
+        # 3. 插件 (Sing-box 使用官方源编译)
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
@@ -220,7 +219,7 @@ jobs:
         if grep -q "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" .config; then
             echo "SUCCESS: Redmi AX6 target is correctly selected."
         else
-            echo "::error::FAILURE: Redmi AX6 target was dropped!"
+            echo "::error::FAILURE: Redmi AX6 target was dropped! Check for dependency conflicts."
             exit 1
         fi
 
@@ -253,5 +252,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Fixed_BigPartition_V3
+        name: OpenWrt_AX6_Final_Fixed
         path: ${{ env.FIRMWARE }}
