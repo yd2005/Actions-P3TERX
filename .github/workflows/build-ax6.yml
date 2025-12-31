@@ -7,6 +7,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
+  # 禁用 Part1 脚本，防止引入冲突源
   # DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   TZ: Asia/Shanghai
@@ -142,7 +143,7 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区适配 - 终极修复版】
+        # 【大分区适配 - 终极修复版 V8】
         # =======================================================
         echo "Applying Big Partition Layout Patch..."
         
@@ -156,24 +157,17 @@ jobs:
             echo "DTS patched successfully!"
         else
             echo "::error::AX6 DTS file not found!"
-            # 这里不退出了，防止误判
+            # 不退出，尝试继续
         fi
 
-        # 3. 【依赖修复】全局搜索 Makefile 并替换固件依赖
-        echo "Searching for AX6 device definition to patch dependencies..."
-        # 使用 grep -l 查找包含 AX6 定义的文件，并加上 || true 防止找不到时脚本崩溃
-        MK_FILES=$(grep -rl "xiaomi_redmi-router-ax6" target/linux/ipq807x || true)
+        # 3. 【依赖修复 - 暴力替换版】
+        # 不再尝试寻找特定文件，而是将目录下所有 Makefile 中的官方固件依赖全部替换为 NSS 固件
+        # 这样不管设备定义藏在哪里，都会被强制修改
+        echo "Patching ALL image Makefiles to force NSS firmware..."
         
-        if [ -n "$MK_FILES" ]; then
-            for FILE in $MK_FILES; do
-                echo "Patching dependency in: $FILE"
-                # 将官方固件替换为 NSS 固件 (解决 Target Dropped 问题的核心)
-                sed -i 's/ath11k-firmware-qcn9074/ath11k-firmware-qcn9074-nss/g' "$FILE"
-            done
-            echo "All dependencies patched! Now defaulting to NSS firmware."
-        else
-            echo "::warning::Could not find AX6 definition to patch. Build might fail."
-        fi
+        find target/linux/ipq807x -name "*.mk" -exec sed -i 's/ath11k-firmware-qcn9074/ath11k-firmware-qcn9074-nss/g' {} +
+        
+        echo "Dependency patch applied globally. NSS firmware is now default."
         # =======================================================
 
         # --- 生成配置文件 ---
@@ -189,7 +183,7 @@ jobs:
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. Wi-Fi 固件 (因为上面修改了源码依赖，这里不需要再手动指定，默认就是 NSS)
+        # 3. Wi-Fi 固件 (源码已被修改为默认 nss，这里不需要再指定，系统会自动选中)
         
         # 4. 插件
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
@@ -231,7 +225,7 @@ jobs:
         if grep -q "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" .config; then
             echo "SUCCESS: Redmi AX6 target is correctly selected."
         else
-            echo "::error::FAILURE: Redmi AX6 target was dropped! Check for dependency conflicts."
+            echo "::error::FAILURE: Redmi AX6 target was dropped! Check logs."
             exit 1
         fi
 
@@ -264,5 +258,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Final_Fixed_V7
+        name: OpenWrt_AX6_Final_Fixed_V8
         path: ${{ env.FIRMWARE }}
