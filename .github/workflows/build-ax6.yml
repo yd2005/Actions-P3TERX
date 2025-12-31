@@ -33,22 +33,18 @@ jobs:
         sudo chown $USER:$GROUPS /workdir
         sudo apt-get install -y upx
 
-    # --- 步骤：配置 Go 环境 ---
     - name: Setup Go environment
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
         check-latest: true
 
-    # --- 步骤：现场编译定制版 Caddy ---
     - name: Compile Custom Caddy
       run: |
-        echo "Building Custom Caddy with ForwardProxy..."
+        echo "Building Custom Caddy..."
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-        
         GOOS=linux GOARCH=arm64 $(go env GOPATH)/bin/xcaddy build \
           --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
-        
         upx --best --lzma caddy
         
         mkdir -p /tmp/files_caddy/usr/bin
@@ -59,6 +55,7 @@ jobs:
         mv caddy /tmp/files_caddy/usr/bin/caddy
         chmod +x /tmp/files_caddy/usr/bin/caddy
         
+        # Caddy 启动脚本
         cat <<EOF > /tmp/files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
@@ -78,6 +75,7 @@ jobs:
         EOF
         chmod +x /tmp/files_caddy/etc/init.d/caddy
 
+        # 默认 Caddyfile
         cat <<EOF > /tmp/files_caddy/etc/caddy/Caddyfile
         {
             order forward_proxy before file_server
@@ -87,6 +85,7 @@ jobs:
         }
         EOF
 
+        # 防火墙自动开放端口
         cat <<EOF > /tmp/files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
         uci set firewall.caddy80=rule
@@ -129,7 +128,6 @@ jobs:
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
-    # --- 修复 Sing-box 编译报错：替换系统 Golang 为 1.23+ ---
     - name: Fix Golang Version
       run: |
         cd openwrt
@@ -139,7 +137,6 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    # --- 核心修改：Load custom configuration (包含大分区适配) ---
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
@@ -148,82 +145,53 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
         
-        # 1. 注入 Caddy (从 /tmp 绝对路径复制)
+        # 注入 Caddy
         mkdir -p files
         cp -r /tmp/files_caddy/* files/
         
-        # =======================================================
-        # 【大分区适配 - 关键步骤】
-        # 警告：此修改会强制更改分区表以适配常见的 108M/116M 大分区 Uboot
-        # =======================================================
-        
+        # --- 大分区补丁 (针对 Hanwckf Uboot) ---
         echo "Applying Big Partition Layout Patch..."
-        
-        # A. 修改 Makefile：解除固件大小限制
-        # 将 KERNEL_SIZE 从 36M 左右改为 64M (防止编译报错)
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
-        
-        # B. 修改 DTS (设备树)：重新定义分区
-        # 这是一个比较暴力的修改，将 ubi 分区扩大到覆盖剩余空间
-        # 文件路径可能随源码版本变化，这里使用通配符查找
         DTS_FILE=$(find target/linux/ipq807x -name "ipq8074-xiaomi-redmi-router-ax6.dts")
-        
         if [ -f "$DTS_FILE" ]; then
-            echo "Found DTS file: $DTS_FILE"
-            # 这里的逻辑是：在大分区 Uboot 中，系统通常只有一个巨大的 ubi 分区
-            # 我们通过修改 DTS，告诉内核 ubi 分区的范围是 0x5c00000 开始，大小不做严格限制(依靠 UBI 自动探测)
-            # 或者，我们直接修改 reg 属性。
-            # 注意：ImmortalWrt 23.05 的 DTS 比较复杂，这里使用 sed 替换 rootfs 分区定义
-            
-            # 尝试替换 ubi 分区的 reg 值 (适配常见的 110M+ 布局)
-            # 原厂通常是 <0x5c00000 0x2a00000>
-            # 替换为 <0x5c00000 0x7400000> (约 116MB)
             sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' $DTS_FILE
-            
-            echo "DTS patched for Big Partition."
+            echo "DTS patched: $DTS_FILE"
         else
-            echo "Warning: AX6 DTS file not found! Partition patch failed."
+            echo "::error::AX6 DTS file not found! Check source code structure."
+            exit 1
         fi
-        
-        # =======================================================
-        
+
+        # --- 生成配置文件 ---
         touch .config
         
-        # 基础机型设置
+        # 1. 强制指定 AX6 目标
         echo "CONFIG_TARGET_ipq807x=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # NSS 硬件加速
+        # 2. NSS 加速 (允许自动处理 Wi-Fi 固件依赖，不要手动禁用 qcn9074)
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # Wi-Fi 固件
-        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074=n" >> .config
-        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
-        
-        # 插件列表
+        # 3. 插件
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
-        
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
         echo "CONFIG_PACKAGE_zerotier=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
-        
         echo "CONFIG_PACKAGE_luci-app-acme=y" >> .config
         echo "CONFIG_PACKAGE_acme=y" >> .config
         echo "CONFIG_PACKAGE_acme-dnsapi=y" >> .config
         echo "CONFIG_PACKAGE_socat=y" >> .config
         echo "CONFIG_PACKAGE_curl=y" >> .config
-        
         echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config
         echo "CONFIG_PACKAGE_nano=y" >> .config
         echo "CONFIG_PACKAGE_htop=y" >> .config
         
-        # 清理不必要的
+        # 4. 清理
         echo "CONFIG_PACKAGE_dockerd=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-dockerman=n" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall=n" >> .config
@@ -231,11 +199,22 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-openclash=n" >> .config
         echo "CONFIG_PACKAGE_naiveproxy=n" >> .config
         
-        # 压缩设置
+        # 5. 压缩
         echo "CONFIG_STRIP_KERNEL_EXPORTS=y" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
         
         make defconfig
+        
+        # --- 关键检查：确认 AX6 是否真的被选中 ---
+        echo "Checking if AX6 target is selected..."
+        if grep -q "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" .config; then
+            echo "SUCCESS: Redmi AX6 target is correctly selected."
+        else
+            echo "::error::FAILURE: Redmi AX6 target was dropped! Check dependencies."
+            echo "Current .config content:"
+            cat .config | grep "CONFIG_TARGET"
+            exit 1
+        fi
 
     - name: Download package
       id: package
@@ -266,5 +245,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Server_Ultimate_BigPartition
+        name: OpenWrt_AX6_Fixed
         path: ${{ env.FIRMWARE }}
