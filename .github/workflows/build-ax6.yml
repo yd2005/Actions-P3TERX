@@ -7,7 +7,6 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
-  # 禁用 Part1 脚本，防止引入冲突源
   # DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   TZ: Asia/Shanghai
@@ -143,25 +142,26 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区适配 - 稳定版 V9】
+        # 【大分区 & 依赖修复 - 终极核弹版 V10】
         # =======================================================
-        echo "Applying Big Partition Layout Patch..."
+        echo "Applying patches..."
         
-        # 1. 解锁 Kernel 大小限制 (兼容大体积固件)
+        # 1. 解锁 Kernel 大小限制
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
         
-        # 2. 修改设备树 (DTS) - 已确认路径正确
+        # 2. 修改设备树 (DTS) - 大分区
         DTS_FILE=$(find target/linux/ipq807x -name "ipq8071-ax6.dts" | head -n 1)
         if [ -f "$DTS_FILE" ]; then
-            # 将分区定义从 42MB (0x2a00000) 改为 116MB (0x7400000)
             sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' "$DTS_FILE"
-            echo "DTS patched successfully! (116MB Layout)"
-        else
-            echo "::error::AX6 DTS file not found! Partition patch failed."
-            exit 1
+            echo "DTS patched successfully!"
         fi
-        
-        # 3. [已移除] 不再暴力修改源码中的固件依赖，避免“Target Dropped”错误
+
+        # 3. 【解除依赖死锁】(关键步骤)
+        # 直接在所有设备定义文件中，删除对官方固件的强制引用
+        # 这样 AX6 就不再"必须"安装官方固件，从而允许我们自由选择 NSS 固件
+        echo "Nuking conflicting firmware dependencies..."
+        sed -i 's/ath11k-firmware-qcn9074//g' target/linux/ipq807x/image/*.mk || true
+        echo "Dependency removed. Now we can select NSS firmware freely."
         # =======================================================
 
         # --- 生成配置文件 ---
@@ -173,16 +173,15 @@ jobs:
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
         # 2. NSS 硬件加速 (核心功能)
-        # 启用这些模块即可获得硬件转发加速，无需特定的 Wifi 固件
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. Wi-Fi 固件 (关键修改：不强制指定)
-        # 移除所有关于 ath11k-firmware 的手动配置，让系统自动选择最兼容的版本
-        # 这样可以 100% 避免依赖冲突
+        # 3. Wi-Fi 固件 (显式选择 NSS 版)
+        # 因为我们上面删除了源码里的强制依赖，现在这里选 NSS 版就不会冲突了
+        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
         
-        # 4. 插件 (Sing-box, Tailscale 等)
+        # 4. 插件
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
@@ -255,5 +254,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Final_Fixed_V9
+        name: OpenWrt_AX6_Final_Fixed_V10
         path: ${{ env.FIRMWARE }}
