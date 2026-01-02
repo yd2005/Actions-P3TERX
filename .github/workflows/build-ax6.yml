@@ -7,6 +7,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-23.05
   FEEDS_CONF: feeds.conf.default
+  # 禁用 Part1 脚本，只使用官方源，最稳定
   # DIY_P1_SH: diy-immortalwrt-part1.sh
   DIY_P2_SH: diy-ax6-part2.sh
   TZ: Asia/Shanghai
@@ -33,7 +34,7 @@ jobs:
         sudo chown $USER:$GROUPS /workdir
         sudo apt-get install -y upx
 
-    # --- Caddy 编译 ---
+    # --- Caddy 编译 (使用 Action 环境的 Go 1.22) ---
     - name: Setup Go environment
       uses: actions/setup-go@v5
       with:
@@ -56,6 +57,7 @@ jobs:
         mv caddy /tmp/files_caddy/usr/bin/caddy
         chmod +x /tmp/files_caddy/usr/bin/caddy
         
+        # 启动脚本
         cat <<EOF > /tmp/files_caddy/etc/init.d/caddy
         #!/bin/sh /etc/rc.common
         START=99
@@ -75,6 +77,7 @@ jobs:
         EOF
         chmod +x /tmp/files_caddy/etc/init.d/caddy
 
+        # 默认配置
         cat <<EOF > /tmp/files_caddy/etc/caddy/Caddyfile
         {
             order forward_proxy before file_server
@@ -84,6 +87,7 @@ jobs:
         }
         EOF
 
+        # 防火墙端口开放
         cat <<EOF > /tmp/files_caddy/etc/uci-defaults/99-open-caddy-ports
         #!/bin/sh
         uci set firewall.caddy80=rule
@@ -142,26 +146,25 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区 & 依赖修复 - 终极核弹版 V10】
+        # 【大分区适配 - 稳定版 V11】
         # =======================================================
-        echo "Applying patches..."
+        echo "Applying Big Partition Layout Patch..."
         
         # 1. 解锁 Kernel 大小限制
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
         
-        # 2. 修改设备树 (DTS) - 大分区
-        DTS_FILE=$(find target/linux/ipq807x -name "ipq8071-ax6.dts" | head -n 1)
+        # 2. 修改设备树 (DTS)
+        # 你的日志证明此路径和文件名是完全正确的，无需更改
+        DTS_FILE="target/linux/ipq807x/files/arch/arm64/boot/dts/qcom/ipq8071-ax6.dts"
+        
         if [ -f "$DTS_FILE" ]; then
+            # 将分区定义从 42MB (0x2a00000) 改为 116MB (0x7400000)
             sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' "$DTS_FILE"
-            echo "DTS patched successfully!"
+            echo "DTS patched successfully! (116MB Layout)"
+        else
+            echo "::error::AX6 DTS file not found at: $DTS_FILE"
+            exit 1
         fi
-
-        # 3. 【解除依赖死锁】(关键步骤)
-        # 直接在所有设备定义文件中，删除对官方固件的强制引用
-        # 这样 AX6 就不再"必须"安装官方固件，从而允许我们自由选择 NSS 固件
-        echo "Nuking conflicting firmware dependencies..."
-        sed -i 's/ath11k-firmware-qcn9074//g' target/linux/ipq807x/image/*.mk || true
-        echo "Dependency removed. Now we can select NSS firmware freely."
         # =======================================================
 
         # --- 生成配置文件 ---
@@ -173,13 +176,14 @@ jobs:
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
         # 2. NSS 硬件加速 (核心功能)
+        # 只要这三个在，硬件加速就在，不用纠结固件版本
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. Wi-Fi 固件 (显式选择 NSS 版)
-        # 因为我们上面删除了源码里的强制依赖，现在这里选 NSS 版就不会冲突了
-        echo "CONFIG_PACKAGE_ath11k-firmware-qcn9074-nss=y" >> .config
+        # 3. Wi-Fi 固件 - 【关键修改】
+        # 不写入任何 ath11k 配置，让系统使用默认的官方固件
+        # 这样可以 100% 确保依赖关系正确，不会丢弃目标
         
         # 4. 插件
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
@@ -221,7 +225,7 @@ jobs:
         if grep -q "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" .config; then
             echo "SUCCESS: Redmi AX6 target is correctly selected."
         else
-            echo "::error::FAILURE: Redmi AX6 target was dropped! Check logs."
+            echo "::error::FAILURE: Redmi AX6 target was dropped! Check for dependency conflicts."
             exit 1
         fi
 
@@ -254,5 +258,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Final_Fixed_V10
+        name: OpenWrt_AX6_Final_Fixed_V11
         path: ${{ env.FIRMWARE }}
