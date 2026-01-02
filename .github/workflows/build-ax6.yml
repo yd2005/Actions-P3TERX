@@ -143,31 +143,25 @@ jobs:
         cp -r /tmp/files_caddy/* files/
         
         # =======================================================
-        # 【大分区适配 - 终极修复版 V8】
+        # 【大分区适配 - 稳定版 V9】
         # =======================================================
         echo "Applying Big Partition Layout Patch..."
         
-        # 1. 解锁 Kernel 大小限制
+        # 1. 解锁 Kernel 大小限制 (兼容大体积固件)
         sed -i 's/KERNEL_SIZE := .*/KERNEL_SIZE := 65536k/' target/linux/ipq807x/image/generic.mk
         
-        # 2. 修改设备树 (已验证路径正确)
+        # 2. 修改设备树 (DTS) - 已确认路径正确
         DTS_FILE=$(find target/linux/ipq807x -name "ipq8071-ax6.dts" | head -n 1)
         if [ -f "$DTS_FILE" ]; then
+            # 将分区定义从 42MB (0x2a00000) 改为 116MB (0x7400000)
             sed -i 's/<0x5c00000 0x2a00000>/<0x5c00000 0x7400000>/g' "$DTS_FILE"
-            echo "DTS patched successfully!"
+            echo "DTS patched successfully! (116MB Layout)"
         else
-            echo "::error::AX6 DTS file not found!"
-            # 不退出，尝试继续
+            echo "::error::AX6 DTS file not found! Partition patch failed."
+            exit 1
         fi
-
-        # 3. 【依赖修复 - 暴力替换版】
-        # 不再尝试寻找特定文件，而是将目录下所有 Makefile 中的官方固件依赖全部替换为 NSS 固件
-        # 这样不管设备定义藏在哪里，都会被强制修改
-        echo "Patching ALL image Makefiles to force NSS firmware..."
         
-        find target/linux/ipq807x -name "*.mk" -exec sed -i 's/ath11k-firmware-qcn9074/ath11k-firmware-qcn9074-nss/g' {} +
-        
-        echo "Dependency patch applied globally. NSS firmware is now default."
+        # 3. [已移除] 不再暴力修改源码中的固件依赖，避免“Target Dropped”错误
         # =======================================================
 
         # --- 生成配置文件 ---
@@ -178,14 +172,17 @@ jobs:
         echo "CONFIG_TARGET_ipq807x_generic=y" >> .config
         echo "CONFIG_TARGET_ipq807x_generic_DEVICE_xiaomi_redmi-router-ax6=y" >> .config
         
-        # 2. NSS 加速
+        # 2. NSS 硬件加速 (核心功能)
+        # 启用这些模块即可获得硬件转发加速，无需特定的 Wifi 固件
         echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config
         echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config
         
-        # 3. Wi-Fi 固件 (源码已被修改为默认 nss，这里不需要再指定，系统会自动选中)
+        # 3. Wi-Fi 固件 (关键修改：不强制指定)
+        # 移除所有关于 ath11k-firmware 的手动配置，让系统自动选择最兼容的版本
+        # 这样可以 100% 避免依赖冲突
         
-        # 4. 插件
+        # 4. 插件 (Sing-box, Tailscale 等)
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-sing-box=y" >> .config
         echo "CONFIG_PACKAGE_tailscale=y" >> .config
@@ -258,5 +255,5 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_AX6_Final_Fixed_V8
+        name: OpenWrt_AX6_Final_Fixed_V9
         path: ${{ env.FIRMWARE }}
